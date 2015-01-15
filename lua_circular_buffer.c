@@ -849,7 +849,8 @@ static int circular_buffer_fromstring(lua_State* lua)
 
 
 #ifdef LUA_SANDBOX
-static int output_circular_buffer_full(circular_buffer* cb, output_data* output)
+static int
+output_circular_buffer_full(circular_buffer* cb, lsb_output_data* output)
 {
   unsigned column_idx;
   unsigned row_idx = cb->current_row + 1;
@@ -870,8 +871,9 @@ static int output_circular_buffer_full(circular_buffer* cb, output_data* output)
 }
 
 
-static int output_circular_buffer_cbufd(lua_State* lua, circular_buffer* cb,
-                                 output_data* output)
+static int
+output_circular_buffer_cbufd(lua_State* lua, circular_buffer* cb,
+                             lsb_output_data* output)
 {
   lua_getglobal(lua, mozsvc_circular_buffer_table);
   if (lua_istable(lua, -1)) {
@@ -916,7 +918,7 @@ static int output_circular_buffer_cbufd(lua_State* lua, circular_buffer* cb,
 
 static int output_circular_buffer(lua_State* lua)
 {
-  output_data* output = (output_data*)lua_touserdata(lua, -1);
+  lsb_output_data* output = (lsb_output_data*)lua_touserdata(lua, -1);
   circular_buffer* cb = (circular_buffer*)lua_touserdata(lua, -2);
   if (!(output && cb)) {
     return 0;
@@ -956,7 +958,7 @@ static int output_circular_buffer(lua_State* lua)
 
 
 static int serialize_circular_buffer_delta(lua_State* lua, circular_buffer* cb,
-                                    output_data* output)
+                                    lsb_output_data* output)
 {
   if (cb->ref == LUA_NOREF) return 0;
   lua_getglobal(lua, mozsvc_circular_buffer_table);
@@ -1000,13 +1002,12 @@ static int serialize_circular_buffer_delta(lua_State* lua, circular_buffer* cb,
 
 static int serialize_circular_buffer(lua_State* lua)
 {
-  output_data* output = (output_data*)lua_touserdata(lua, -1);
+  lsb_output_data* output = (lsb_output_data*)lua_touserdata(lua, -1);
   const char *key = (char*)lua_touserdata(lua, -2);
   circular_buffer* cb = (circular_buffer*)lua_touserdata(lua, -3);
   if (!(output && key && cb)) {
     return 0;
   }
-  output->pos = 0;
   char* delta = "";
   if (cb->delta) {
     delta = ", true";
