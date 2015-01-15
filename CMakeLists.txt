@@ -76,6 +76,9 @@ else()
     add_library(circular_buffer SHARED ${LUA_CIRCULAR_BUFFER_SRC})
 endif()
 
-set_target_properties(circular_buffer PROPERTIES PREFIX "")
+if (NOT LUA_SANDBOX_INCLUDE)
+	set_target_properties(circular_buffer PROPERTIES PREFIX "")
+endif()
+
 install(TARGETS circular_buffer DESTINATION lib)
 add_test(test lua ${CMAKE_SOURCE_DIR}/test.lua)
