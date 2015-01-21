@@ -17,7 +17,10 @@
 #include <time.h>
 
 #include "cephes.h"
-#include "lua_circular_buffer.h"
+
+#ifdef _WIN32
+#define snprintf _snprintf
+#endif
 
 #ifdef LUA_SANDBOX
 #include "lsb_output.h"
@@ -27,8 +30,20 @@
 #define COLUMN_NAME_SIZE 16
 #define UNIT_LABEL_SIZE 8
 
-const char* mozsvc_circular_buffer = "mozsvc.circular_buffer";
-const char* mozsvc_circular_buffer_table = "circular_buffer";
+#ifdef _WIN32
+#ifdef lua_circular_buffer_EXPORTS
+#define  LCB_EXPORT __declspec(dllexport)
+#else
+#define  LCB_EXPORT __declspec(dllimport)
+#endif
+#else
+#define LCB_EXPORT
+#endif
+
+LCB_EXPORT int luaopen_circular_buffer(lua_State* lua);
+
+static const char* mozsvc_circular_buffer = "mozsvc.circular_buffer";
+static const char* mozsvc_circular_buffer_table = "circular_buffer";
 
 static const char* column_aggregation_methods[] = { "sum", "min", "max", "none",
   "none", NULL };
