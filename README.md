@@ -12,35 +12,23 @@ basic data analysis functionality.
 * Lua 5.1, Lua 5.2, or LuaJIT
 * [CMake (2.8.7+)](http://cmake.org/cmake/resources/software.html)
 
-### CMake Build
-
-#### lua_circular_buffer  - UNIX Build Instructions
+### CMake Build Instructions
 
     git clone https://github.com/mozilla-services/lua_circular_buffer.git
     cd lua_circular_buffer 
     mkdir release
     cd release
+
+    # UNIX
     cmake -DCMAKE_BUILD_TYPE=release ..
-    make install
+    make
+
+    # Windows Visuas Studio 2013
+    cmake -DCMAKE_BUILD_TYPE=release -G "NMake Makefiles" ..
+    nmake
 
     ctest
-
-#### lua_circular_buffer  - Windows Build Instructions
-
-    # in a VS2013 command prompt window
-
-    git clone https://github.com/mozilla-services/lua_circular_buffer.git
-    cd lua_circular_buffer 
-    mkdir release
-    cd release
-    cmake -DCMAKE_BUILD_TYPE=release -G "NMake Makefiles" ..
-    nmake install
-
-    # To run the tests you must install
-    cmake -DCMAKE_INSTALL_PREFIX="" ..
-    nmake install DESTDIR=test
-    cd ..\src\test
-    ..\..\release\test\lib\test_lua_circular_buffer.exe
+    cpack
 
 ## Module
 
@@ -76,6 +64,20 @@ globally registered and returned by the require function.
 
 *Return*
 - circular_buffer userdata object.
+
+#### version
+```lua
+local v = circular_buffer.version()
+-- v == "0.1.0"
+```
+
+Returns a string with the running version of circular_buffer.
+
+*Arguments*
+- none
+
+*Return*
+- Semantic version string
 
 ### API Methods
 **Note:** All column arguments are 1 based. If the column is out of range for the configured circular buffer a fatal error is generated.

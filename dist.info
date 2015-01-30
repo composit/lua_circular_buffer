@@ -1,0 +1,12 @@
+name = "circular_buffer"
+version = "0.1.0"
+
+desc = "Circular buffer time series data store and analysis for Lua"
+author = "Mike Trinkala"
+license = "MPL 2.0"
+url = "https://github.com/mozilla-services/lua_circular_buffer"
+maintainer = "Mike Trinkala"
+
+depends = {
+	"lua >= 5.1"
+}
