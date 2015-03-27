@@ -8,15 +8,15 @@
 
 #include <ctype.h>
 #include <float.h>
-#include <lua.h>
-#include <lauxlib.h>
-#include <lualib.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 #include "cephes.h"
+#include "lauxlib.h"
+#include "lua.h"
+#include "lualib.h"
 
 #ifdef _WIN32
 #define snprintf _snprintf
