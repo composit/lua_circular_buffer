@@ -35,7 +35,7 @@
 if (LUA_SANDBOX_INCLUDE) # build against an uninstalled sandbox
     add_definitions(-DLUA_SANDBOX)
     include_directories(${EP_BASE}/include)
-    set(LUA_INCLUDE_DIR ${EP_BASE}/include/lsb)
+    set(LUA_INCLUDE_DIR ${EP_BASE}/include/luasandbox)
     include_directories(${LUA_SANDBOX_INCLUDE})
     set(LIB_PATH ${EP_BASE}/lib)
     find_library(LUA_LIBRARY luasb PATHS ${LIB_PATH} NO_DEFAULT_PATH)

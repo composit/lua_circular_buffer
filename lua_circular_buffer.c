@@ -23,8 +23,8 @@
 #endif
 
 #ifdef LUA_SANDBOX
-#include "lsb_output.h"
-#include "lsb_serialize.h"
+#include "luasandbox_output.h"
+#include "luasandbox_serialize.h"
 #endif
 
 #define COLUMN_NAME_SIZE 16
