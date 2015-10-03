@@ -22,6 +22,10 @@
 #define snprintf _snprintf
 #endif
 
+#ifdef _MSC_VER
+#pragma warning( disable : 4056 )
+#endif
+
 #ifdef LUA_SANDBOX
 #include "luasandbox_output.h"
 #include "luasandbox_serialize.h"
@@ -36,7 +40,10 @@ static const char* mozsvc_circular_buffer_table = "circular_buffer";
 static const char* column_aggregation_methods[] = { "sum", "min", "max", "none",
   "none", NULL };
 static const char* default_unit = "count";
+
+#if defined(LUA_SANDBOX) || defined(_MSC_VER)
 static const char* not_a_number = "nan";
+#endif
 
 typedef enum {
   AGGREGATION_SUM = 0,
@@ -337,7 +344,7 @@ static int circular_buffer_set(lua_State* lua)
     double old = cb->values[i];
     switch (cb->headers[column].aggregation) {
     case AGGREGATION_MIN:
-      if (isnan(cb->values[i]) || value < cb->values[i]) {
+      if (isnan(cb->values[i]) || value < old) {
         cb->values[i] = value;
         if (cb->delta) {
           circular_buffer_add_delta(lua, cb, ns, column, value);
@@ -345,7 +352,7 @@ static int circular_buffer_set(lua_State* lua)
       }
       break;
     case AGGREGATION_MAX:
-      if (isnan(cb->values[i]) || value > cb->values[i]) {
+      if (isnan(cb->values[i]) || value > old) {
         cb->values[i] = value;
         if (cb->delta) {
           circular_buffer_add_delta(lua, cb, ns, column, value);
@@ -355,7 +362,7 @@ static int circular_buffer_set(lua_State* lua)
     default:
       cb->values[i] = value;
       if (cb->delta) {
-        if (!isnan(old)) {
+        if (!isnan(old) && old != INFINITY && old != -INFINITY) {
           value -= old;
         }
         circular_buffer_add_delta(lua, cb, ns, column, value);
@@ -785,18 +792,22 @@ static int read_double(char** p, double* value)
   }
   if (0 == **p) return 0;
 
-  if (**p == not_a_number[0]) {
-    ++*p;
-    if (0 == **p || **p != not_a_number[1]) return 0;
-
-    ++*p;
-    if (0 == **p || **p != not_a_number[2]) return 0;
-
-    ++*p;
+#ifdef _MSC_VER
+  if ((*p)[0] == 'n' && strncmp(*p, not_a_number, 3) == 0) {
+    *p += 3;
     *value = NAN;
+  } else if ((*p)[0] == 'i' && strncmp(*p, "inf", 3) == 0) {
+    *p += 3;
+    *value = INFINITY;
+  } else if ((*p)[0] == '-' && strncmp(*p, "-inf", 4) == 0) {
+    *p += 4;
+    *value = -INFINITY;
   } else {
     *value = strtod(*p, &*p);
   }
+#else
+  *value = strtod(*p, &*p);
+#endif
   return 1;
 }
 
@@ -874,7 +885,7 @@ output_circular_buffer_full(circular_buffer* cb, lsb_output_data* output)
       if (column_idx != 0) {
         if (lsb_appendc(output, '\t')) return 1;
       }
-      if (lsb_serialize_double(output,
+      if (lsb_output_double(output,
                                cb->values[(row_idx * cb->columns) + column_idx])) {
         return 1;
       }
@@ -902,7 +913,7 @@ output_circular_buffer_cbufd(lua_State* lua, circular_buffer* cb,
       if (!lua_istable(lua, -1)) {
         luaL_error(lua, "Invalid delta table structure");
       }
-      if (lsb_serialize_double(output, lua_tonumber(lua, -2))) return 1;
+      if (lsb_output_double(output, lua_tonumber(lua, -2))) return 1;
       for (unsigned column_idx = 0; column_idx < cb->columns;
            ++column_idx) {
         if (lsb_appendc(output, '\t')) return 1;
@@ -910,7 +921,7 @@ output_circular_buffer_cbufd(lua_State* lua, circular_buffer* cb,
         if (LUA_TNIL == lua_type(lua, -1)) {
           if (lsb_appends(output, not_a_number, 3)) return 1;
         } else {
-          if (lsb_serialize_double(output, lua_tonumber(lua, -1))) return 1;
+          if (lsb_output_double(output, lua_tonumber(lua, -1))) return 1;
         }
         lua_pop(lua, 1); // remove the number
       }
@@ -935,7 +946,7 @@ static int output_circular_buffer(lua_State* lua)
   lsb_output_data* output = (lsb_output_data*)lua_touserdata(lua, -1);
   circular_buffer* cb = (circular_buffer*)lua_touserdata(lua, -2);
   if (!(output && cb)) {
-    return 0;
+    return 1;
   }
   if (OUTPUT_CBUFD == cb->format) {
     if (cb->ref == LUA_NOREF) return 0;
@@ -989,13 +1000,15 @@ static int serialize_circular_buffer_delta(lua_State* lua, circular_buffer* cb,
         luaL_error(lua, "Invalid delta table structure");
       }
       if (lsb_appendc(output, ' ')) return 1;
-      if (lsb_serialize_double(output, lua_tonumber(lua, -2))) return 1;
+      // intentionally not serialized as Lua
+      if (lsb_output_double(output, lua_tonumber(lua, -2))) return 1;
 
       for (unsigned column_idx = 0; column_idx < cb->columns;
            ++column_idx) {
         if (lsb_appendc(output, ' ')) return 1;
         lua_rawgeti(lua, -1, column_idx);
-        if (lsb_serialize_double(output, lua_tonumber(lua, -1))) return 1;
+        // intentionally not serialized as Lua
+        if (lsb_output_double(output, lua_tonumber(lua, -1))) return 1;
         lua_pop(lua, 1); // remove the number
       }
       lua_pop(lua, 1); // remove the value, keep the key
@@ -1020,7 +1033,7 @@ static int serialize_circular_buffer(lua_State* lua)
   const char* key = (char*)lua_touserdata(lua, -2);
   circular_buffer* cb = (circular_buffer*)lua_touserdata(lua, -3);
   if (!(output && key && cb)) {
-    return 0;
+    return 1;
   }
   char* delta = "";
   if (cb->delta) {
@@ -1058,8 +1071,9 @@ static int serialize_circular_buffer(lua_State* lua)
   for (unsigned row_idx = 0; row_idx < cb->rows; ++row_idx) {
     for (column_idx = 0; column_idx < cb->columns; ++column_idx) {
       if (lsb_appendc(output, ' ')) return 1;
-      if (lsb_serialize_double(output,
-                               cb->values[(row_idx * cb->columns) + column_idx])) {
+      // intentionally not serialized as Lua
+      if (lsb_output_double(output,
+                             cb->values[(row_idx * cb->columns) + column_idx])) {
         return 1;
       }
     }

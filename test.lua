@@ -313,7 +313,17 @@ local tests = {
         if u1 + u2 ~= 3600 then
             error(string.format("u1 is %g u2 is %g %g", u1, u2, maxu))
         end
+        end,
+    function()
+        local stats = circular_buffer.new(4, 1, 1)
+        stats:set(1e9, 1, 1/0)
+        stats:set(2e9, 1, 8)
+        stats:set(3e9, 1, 8)
+        local t = stats:compute("avg", 1)
+        if 1/0 ~= t then
+            error(string.format("no range avg = %G", t))
         end
+        end,
 }
 
 for i, v in ipairs(tests) do
