@@ -24,6 +24,7 @@
 
 #ifdef _MSC_VER
 #pragma warning( disable : 4056 )
+#pragma warning( disable : 4756 )
 #endif
 
 #ifdef LUA_SANDBOX
