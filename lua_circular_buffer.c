@@ -876,7 +876,7 @@ static int circular_buffer_version(lua_State* lua)
 
 #ifdef LUA_SANDBOX
 static int
-output_circular_buffer_full(circular_buffer* cb, lsb_output_data* output)
+output_circular_buffer_full(circular_buffer* cb, lsb_output_buffer* ob)
 {
   unsigned column_idx;
   unsigned row_idx = cb->current_row + 1;
@@ -884,14 +884,13 @@ output_circular_buffer_full(circular_buffer* cb, lsb_output_data* output)
     if (row_idx >= cb->rows) row_idx = 0;
     for (column_idx = 0; column_idx < cb->columns; ++column_idx) {
       if (column_idx != 0) {
-        if (lsb_appendc(output, '\t')) return 1;
+        if (lsb_outputc(ob, '\t')) return 1;
       }
-      if (lsb_output_double(output,
-                               cb->values[(row_idx * cb->columns) + column_idx])) {
+      if (lsb_outputd(ob, cb->values[(row_idx * cb->columns) + column_idx])) {
         return 1;
       }
     }
-    if (lsb_appendc(output, '\n')) return 1;
+    if (lsb_outputc(ob, '\n')) return 1;
   }
   return 0;
 }
@@ -899,7 +898,7 @@ output_circular_buffer_full(circular_buffer* cb, lsb_output_data* output)
 
 static int
 output_circular_buffer_cbufd(lua_State* lua, circular_buffer* cb,
-                             lsb_output_data* output)
+                             lsb_output_buffer* ob)
 {
   lua_getglobal(lua, mozsvc_circular_buffer_table);
   if (lua_istable(lua, -1)) {
@@ -914,19 +913,19 @@ output_circular_buffer_cbufd(lua_State* lua, circular_buffer* cb,
       if (!lua_istable(lua, -1)) {
         luaL_error(lua, "Invalid delta table structure");
       }
-      if (lsb_output_double(output, lua_tonumber(lua, -2))) return 1;
+      if (lsb_outputd(ob, lua_tonumber(lua, -2))) return 1;
       for (unsigned column_idx = 0; column_idx < cb->columns;
            ++column_idx) {
-        if (lsb_appendc(output, '\t')) return 1;
+        if (lsb_outputc(ob, '\t')) return 1;
         lua_rawgeti(lua, -1, column_idx);
         if (LUA_TNIL == lua_type(lua, -1)) {
-          if (lsb_appends(output, not_a_number, 3)) return 1;
+          if (lsb_outputs(ob, not_a_number, 3)) return 1;
         } else {
-          if (lsb_output_double(output, lua_tonumber(lua, -1))) return 1;
+          if (lsb_outputd(ob, lua_tonumber(lua, -1))) return 1;
         }
         lua_pop(lua, 1); // remove the number
       }
-      if (lsb_appendc(output, '\n')) return 1;
+      if (lsb_outputc(ob, '\n')) return 1;
       lua_pop(lua, 1); // remove the value, keep the key
     }
     lua_pop(lua, 1); // remove the delta table
@@ -944,17 +943,18 @@ output_circular_buffer_cbufd(lua_State* lua, circular_buffer* cb,
 
 static int output_circular_buffer(lua_State* lua)
 {
-  lsb_output_data* output = (lsb_output_data*)lua_touserdata(lua, -1);
-  circular_buffer* cb = (circular_buffer*)lua_touserdata(lua, -2);
-  if (!(output && cb)) {
+  lsb_output_buffer* ob = lua_touserdata(lua, -1);
+  circular_buffer* cb = lua_touserdata(lua, -2);
+  if (!(ob && cb)) {
     return 1;
   }
   if (OUTPUT_CBUFD == cb->format) {
     if (cb->ref == LUA_NOREF) return 0;
   }
 
-  if (lsb_appendf(output,
-                  "{\"time\":%lld,\"rows\":%d,\"columns\":%d,\"seconds_per_row\":%d,\"column_info\":[",
+  if (lsb_outputf(ob,
+                  "{\"time\":%lld,\"rows\":%d,\"columns\":%d,\""
+                  "seconds_per_row\":%d,\"column_info\":[",
                   (long long)get_start_time(cb),
                   cb->rows,
                   cb->columns,
@@ -965,26 +965,27 @@ static int output_circular_buffer(lua_State* lua)
   unsigned column_idx;
   for (column_idx = 0; column_idx < cb->columns; ++column_idx) {
     if (column_idx != 0) {
-      if (lsb_appendc(output, ',')) return 1;
+      if (lsb_outputc(ob, ',')) return 1;
     }
-    if (lsb_appendf(output, "{\"name\":\"%s\",\"unit\":\"%s\",\"aggregation\":\"%s\"}",
+    if (lsb_outputf(ob, "{\"name\":\"%s\",\"unit\":\"%s\",\""
+                        "aggregation\":\"%s\"}",
                     cb->headers[column_idx].name,
                     cb->headers[column_idx].unit,
                     column_aggregation_methods[cb->headers[column_idx].aggregation])) {
       return 1;
     }
   }
-  if (lsb_appends(output, "]}\n", 3)) return 1;
+  if (lsb_outputs(ob, "]}\n", 3)) return 1;
 
   if (OUTPUT_CBUFD == cb->format) {
-    return output_circular_buffer_cbufd(lua, cb, output);
+    return output_circular_buffer_cbufd(lua, cb, ob);
   }
-  return output_circular_buffer_full(cb, output);
+  return output_circular_buffer_full(cb, ob);
 }
 
 
 static int serialize_circular_buffer_delta(lua_State* lua, circular_buffer* cb,
-                                           lsb_output_data* output)
+                                           lsb_output_buffer* ob)
 {
   if (cb->ref == LUA_NOREF) return 0;
   lua_getglobal(lua, mozsvc_circular_buffer_table);
@@ -1000,16 +1001,16 @@ static int serialize_circular_buffer_delta(lua_State* lua, circular_buffer* cb,
       if (!lua_istable(lua, -1)) {
         luaL_error(lua, "Invalid delta table structure");
       }
-      if (lsb_appendc(output, ' ')) return 1;
+      if (lsb_outputc(ob, ' ')) return 1;
       // intentionally not serialized as Lua
-      if (lsb_output_double(output, lua_tonumber(lua, -2))) return 1;
+      if (lsb_outputd(ob, lua_tonumber(lua, -2))) return 1;
 
       for (unsigned column_idx = 0; column_idx < cb->columns;
            ++column_idx) {
-        if (lsb_appendc(output, ' ')) return 1;
+        if (lsb_outputc(ob, ' ')) return 1;
         lua_rawgeti(lua, -1, column_idx);
         // intentionally not serialized as Lua
-        if (lsb_output_double(output, lua_tonumber(lua, -1))) return 1;
+        if (lsb_outputd(ob, lua_tonumber(lua, -1))) return 1;
         lua_pop(lua, 1); // remove the number
       }
       lua_pop(lua, 1); // remove the value, keep the key
@@ -1030,17 +1031,17 @@ static int serialize_circular_buffer_delta(lua_State* lua, circular_buffer* cb,
 
 static int serialize_circular_buffer(lua_State* lua)
 {
-  lsb_output_data* output = (lsb_output_data*)lua_touserdata(lua, -1);
-  const char* key = (char*)lua_touserdata(lua, -2);
-  circular_buffer* cb = (circular_buffer*)lua_touserdata(lua, -3);
-  if (!(output && key && cb)) {
+  lsb_output_buffer* ob = lua_touserdata(lua, -1);
+  const char* key = lua_touserdata(lua, -2);
+  circular_buffer* cb = lua_touserdata(lua, -3);
+  if (!(ob && key && cb)) {
     return 1;
   }
   char* delta = "";
   if (cb->delta) {
     delta = ", true";
   }
-  if (lsb_appendf(output,
+  if (lsb_outputf(ob,
                   "if %s == nil then %s = circular_buffer.new(%d, %d, %d%s) end\n",
                   key,
                   key,
@@ -1053,7 +1054,7 @@ static int serialize_circular_buffer(lua_State* lua)
 
   unsigned column_idx;
   for (column_idx = 0; column_idx < cb->columns; ++column_idx) {
-    if (lsb_appendf(output, "%s:set_header(%d, \"%s\", \"%s\", \"%s\")\n",
+    if (lsb_outputf(ob, "%s:set_header(%d, \"%s\", \"%s\", \"%s\")\n",
                     key,
                     column_idx + 1,
                     cb->headers[column_idx].name,
@@ -1063,7 +1064,7 @@ static int serialize_circular_buffer(lua_State* lua)
     }
   }
 
-  if (lsb_appendf(output, "%s:fromstring(\"%lld %d",
+  if (lsb_outputf(ob, "%s:fromstring(\"%lld %d",
                   key,
                   (long long)cb->current_time,
                   cb->current_row)) {
@@ -1071,18 +1072,17 @@ static int serialize_circular_buffer(lua_State* lua)
   }
   for (unsigned row_idx = 0; row_idx < cb->rows; ++row_idx) {
     for (column_idx = 0; column_idx < cb->columns; ++column_idx) {
-      if (lsb_appendc(output, ' ')) return 1;
+      if (lsb_outputc(ob, ' ')) return 1;
       // intentionally not serialized as Lua
-      if (lsb_output_double(output,
-                             cb->values[(row_idx * cb->columns) + column_idx])) {
+      if (lsb_outputd(ob, cb->values[(row_idx * cb->columns) + column_idx])) {
         return 1;
       }
     }
   }
-  if (serialize_circular_buffer_delta(lua, cb, output)) {
+  if (serialize_circular_buffer_delta(lua, cb, ob)) {
     return 1;
   }
-  if (lsb_appends(output, "\")\n", 3)) {
+  if (lsb_outputs(ob, "\")\n", 3)) {
     return 1;
   }
   return 0;

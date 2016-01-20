@@ -9,7 +9,7 @@ basic data analysis functionality.
 
 ### Prerequisites
 * C compiler (GCC 4.7+, Visual Studio 2013, MinGW (Lua 5.1))
-* Lua 5.1, Lua 5.2, or LuaJIT
+* Lua 5.1 or LuaJIT
 * [CMake (2.8.7+)](http://cmake.org/cmake/resources/software.html)
 
 ### CMake Build Instructions
