@@ -203,20 +203,22 @@ Retrieves the header metadata for the specified column.
     - unit
     - aggregation_method
 
-#### compute
+#### get_range
 ```lua
-cb:set(1e9, 5)
-cb:set(60e9, 10)
-cb:set(180e9, 1)
-d, active_rows = cb:compute("sum", 1)
--- d = 16
--- active_rows = 3
+local stats = circular_buffer.new(5, 1, 1)
+stats:set(1e9, 1, 1)
+stats:set(2e9, 1, 2)
+stats:set(3e9, 1, 3)
+stats:set(4e9, 1, 4)
+stats:set(5e9, 1, 5)
+
+local a = stats:get_range(1, 3e9, 4e9)
+-- a = {3, 4}
 ```
 
-Performs a basic calculation on a column spaning the specified number of rows.
+Returns an array of column values spanning the specificed time range.
 
 *Arguments*
-- function (string) The name of the compute function (sum|avg|sd|min|max|variance).
 - column (unsigned) The column that the computation is performed against.
 - start (unsigned _optional_) The number of nanosecond since the UNIX epoch. Sets the
     start time of the computation range; if nil the buffer's start time is used.
@@ -225,40 +227,7 @@ Performs a basic calculation on a column spaning the specified number of rows.
     The end time must be greater than or equal to the start time.
 
 *Returns*
-- The result of the computation for the specifed column over the given range or nil if the range fell outside of the buffer.
-- The number of rows that contained a valid numeric value.
-
-#### mannwhitneyu
-```lua
-local cb = circular_buffer.new(40,1,1)
-local data = {15309,14092,13661,13412,14205,15042,14142,13820,14917,13953,14320,14472,15133,13790,14539,14129,14363,14202,13841,13610,13759,14428,14851,13838,13819,14468,14989,15557,14380,13500,14818,14632,13631,14663,14532,14188,14537,14109,13925,15022}
-for i,v in ipairs(data) do
-    cb:set(i*1e9, 1, v)
-end
-local u, p = cb:mannwhitneyu(1, 1e9, 20e9, 21e9, 40e9)
--- u == 171
--- p == 0.22037
-```
-
-Computes the Mann-Whitney rank test on samples x and y.
-
-*Arguments*
-- column (unsigned) The column that the computation is performed against.
-- start_1 (unsigned) The number of nanosecond since the UNIX epoch.
-- end_1 (unsigned) The number of nanosecond since the UNIX epoch. The end time must be greater than or equal to the start time.
-- start_2 (unsigned).
-- end_2 (unsigned).
-- use_continuity (bool _optional_) Whether a continuity correction (1/2) should be taken into account (default: true).
-
-*Returns* (nil if the range fell outside the buffer)
-- U_1 Mann-Whitney statistic.
-- One-sided p-value assuming a asymptotic normal distribution.
-
-**Note:** Use only when the number of observation in each sample is > 20 and you have 2 independent samples of ranks. 
-Mann-Whitney U is significant if the u-obtained is LESS THAN or equal to the critical value of U.
-
-This test corrects for ties and by default uses a continuity correction. The reported p-value is for a one-sided
-hypothesis, to get the two-sided p-value multiply the returned p-value by 2.
+- Array of column values or nil if the range fell outside of the buffer.
 
 #### current_time
 ```lua

@@ -53,8 +53,8 @@ typedef enum {
 } COLUMN_AGGREGATION;
 
 typedef enum {
-  OUTPUT_CBUF = 0,
-  OUTPUT_CBUFD = 1,
+  OUTPUT_CBUF   = 0,
+  OUTPUT_CBUFD  = 1,
 } OUTPUT_FORMAT;
 
 typedef struct
