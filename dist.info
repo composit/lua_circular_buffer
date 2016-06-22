@@ -1,5 +1,5 @@
 name = "circular_buffer"
-version = "0.5.1"
+version = "0.5.2"
 
 desc = "Circular buffer time series data store and analysis for Lua"
 author = "Mike Trinkala"

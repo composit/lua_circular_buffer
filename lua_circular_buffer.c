@@ -720,18 +720,18 @@ output_cbufd(circular_buffer *cb, lsb_output_buffer *ob, bool serialize)
 }
 
 
-static void
+static int
 output_annotations(lua_State *lua, circular_buffer *cb, lsb_output_buffer *ob,
                    const char *key)
 {
-  if (cb->ref == LUA_NOREF) return;
+  if (cb->ref == LUA_NOREF) return 0;
 
   lua_getglobal(lua, mozsvc_circular_buffer_table);
   if (lua_istable(lua, -1)) {
     lua_rawgeti(lua, -1, cb->ref); // get the annotation table for this cbuf
     if (!lua_istable(lua, -1)) {
       lua_pop(lua, 2); // remove value and cbuf table
-      return;
+      return 0;
     }
     lua_pushnil(lua);
     bool first = true;
@@ -760,13 +760,13 @@ output_annotations(lua_State *lua, circular_buffer *cb, lsb_output_buffer *ob,
           bool delta = lua_toboolean(lua, -1);
           lua_pop(lua, 1);
 
-          int output = 1;
+          bool output = true;
           if (!key && OUTPUT_CBUFD == cb->format) {
             if (delta) {
               lua_pushnil(lua);
               lua_setfield(lua, -2, "delta");
             } else {
-              output = 0;
+              output = false;
             }
           }
           if (output) {
@@ -779,24 +779,28 @@ output_annotations(lua_State *lua, circular_buffer *cb, lsb_output_buffer *ob,
               luaL_error(lua, "malformend annotation table");
             }
             if (key) {
-              lsb_outputf(ob, "%s:annotate(%g, %u, \"%s\", \"%s\", %s)\n",
-                          key,
-                          ti * 1e9,
-                          col,
-                          atype,
-                          annotation,
-                          delta ? "true" : "false");
+              if (lsb_outputf(ob, "%s:annotate(%g, %u, \"%s\", \"%s\", %s)\n",
+                              key,
+                              ti * 1e9,
+                              col,
+                              atype,
+                              annotation,
+                              delta ? "true" : "false")) {
+                return 1;
+              }
             } else {
               if (first) {
                 first = false;
               } else {
-                lsb_outputc(ob, ',');
+                if (lsb_outputc(ob, ',')) return 1;
               }
-              lsb_outputf(ob, "{\"x\":%lld,"
-                          "\"col\":%u,"
-                          "\"shortText\":\"%c\","
-                          "\"text\":\"%s\"}",
-                          ti * 1000LL, col, atype[0], annotation);
+              if (lsb_outputf(ob, "{\"x\":%lld,"
+                              "\"col\":%u,"
+                              "\"shortText\":\"%c\","
+                              "\"text\":\"%s\"}",
+                              ti * 1000LL, col, atype[0], annotation)) {
+                return 1;
+              }
             }
             lua_pop(lua, 2); // remove atype and text
           }
@@ -810,7 +814,7 @@ output_annotations(lua_State *lua, circular_buffer *cb, lsb_output_buffer *ob,
     luaL_error(lua, "Could not find table %s", mozsvc_circular_buffer_table);
   }
   lua_pop(lua, 1); // remove the circular buffer table or failed nil
-  return;
+  return 0;
 }
 
 
@@ -822,6 +826,8 @@ static int cb_output(lua_State *lua)
     return 1;
   }
 
+  size_t pos;
+  bool has_anno = false;
   if (lsb_outputf(ob,
                   "{\"time\":%lld,\"rows\":%d,\"columns\":%d,\""
                   "seconds_per_row\":%d,\"column_info\":[",
@@ -845,13 +851,15 @@ static int cb_output(lua_State *lua)
     }
   }
   if (lsb_outputs(ob, "],\"annotations\":[", 17)) return 1;
-  output_annotations(lua, cb, ob, NULL);
+  pos = ob->pos;
+  if (output_annotations(lua, cb, ob, NULL)) return 1;
+  if (pos != ob->pos) has_anno = true;
   if (lsb_outputs(ob, "]}\n", 3)) return 1;
 
   if (OUTPUT_CBUFD == cb->format) {
-    size_t pos = ob->pos;
+    pos = ob->pos;
     int rv = output_cbufd(cb, ob, false);
-    if (rv == 0 && ob->pos == pos) {
+    if (rv == 0 && ob->pos == pos && !has_anno) {
       ob->pos = 0;
     }
     return rv;
@@ -889,7 +897,7 @@ static int cb_serialize(lua_State *lua)
     }
   }
 
-  output_annotations(lua, cb, ob, key);
+  if (output_annotations(lua, cb, ob, key)) return 1;
 
   if (lsb_outputf(ob, "%s:fromstring(\"%lld %d",
                   key,
