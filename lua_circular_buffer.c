@@ -735,11 +735,24 @@ output_annotations(lua_State *lua, circular_buffer *cb, lsb_output_buffer *ob,
     }
     lua_pushnil(lua);
     bool first = true;
+    time_t st = get_start_time(cb);
     while (lua_next(lua, -2) != 0) {
       if (!lua_istable(lua, -1)) {
-        luaL_error(lua, "Invalid annotation table structure");
+        luaL_error(lua, "Invalid annotation table value");
       }
-      long long ms = (long long)lua_tonumber(lua, -2) * 1000;
+      if (!lua_isnumber(lua, -2)) {
+        luaL_error(lua, "Invalid annotation table key");
+      }
+
+      time_t ti = (time_t)lua_tointeger(lua, -2);
+      if (ti < st) {
+        lua_pop(lua, 1);        // remove the table value
+        lua_pushvalue(lua, -1); // duplicate the key
+        lua_pushnil(lua);
+        lua_rawset(lua, -4);    // prune the old entry
+        continue;
+      }
+
       for (unsigned col = 1; col <= cb->columns; ++col) {
         lua_rawgeti(lua, -1, col);
         if (lua_type(lua, -1) == LUA_TTABLE) {
@@ -768,7 +781,7 @@ output_annotations(lua_State *lua, circular_buffer *cb, lsb_output_buffer *ob,
             if (key) {
               lsb_outputf(ob, "%s:annotate(%g, %u, \"%s\", \"%s\", %s)\n",
                           key,
-                          ms * 1e6,
+                          ti * 1e9,
                           col,
                           atype,
                           annotation,
@@ -783,7 +796,7 @@ output_annotations(lua_State *lua, circular_buffer *cb, lsb_output_buffer *ob,
                           "\"col\":%u,"
                           "\"shortText\":\"%c\","
                           "\"text\":\"%s\"}",
-                          ms, col, atype[0], annotation);
+                          ti * 1000LL, col, atype[0], annotation);
             }
             lua_pop(lua, 2); // remove atype and text
           }
