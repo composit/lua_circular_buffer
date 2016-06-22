@@ -9,6 +9,7 @@
 #include <ctype.h>
 #include <float.h>
 #include <math.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -37,24 +38,23 @@
 static const char *mozsvc_circular_buffer = "mozsvc.circular_buffer";
 static const char *mozsvc_circular_buffer_table = "circular_buffer";
 
-static const char *column_aggregation_methods[] = { "sum", "min", "max", "none",
-  NULL };
+static const char *agg_methods[] = { "sum", "min", "max", "none", NULL };
 static const char *default_unit = "count";
 
-#if defined(LUA_SANDBOX) || defined(_MSC_VER)
+#if defined(_MSC_VER)
 static const char *not_a_number = "nan";
 #endif
 
 typedef enum {
-  AGGREGATION_SUM   = 0,
-  AGGREGATION_MIN   = 1,
-  AGGREGATION_MAX   = 2,
-  AGGREGATION_NONE  = 4,
+  AGGREGATION_SUM,
+  AGGREGATION_MIN,
+  AGGREGATION_MAX,
+  AGGREGATION_NONE,
 } COLUMN_AGGREGATION;
 
 typedef enum {
-  OUTPUT_CBUF   = 0,
-  OUTPUT_CBUFD  = 1,
+  OUTPUT_CBUF,
+  OUTPUT_CBUFD,
 } OUTPUT_FORMAT;
 
 typedef struct
@@ -71,7 +71,7 @@ typedef struct circular_buffer
   unsigned      current_row;
   unsigned      rows;
   unsigned      columns;
-  int           delta;
+  unsigned      tcolumns; // columns * 2 since we now store the deltas in-line
   OUTPUT_FORMAT format;
   int           ref;
 
@@ -97,8 +97,8 @@ static void copy_cleared_row(circular_buffer *cb, double *cleared, size_t rows)
     } else {
       ask = rows;
     }
-    memcpy(cleared + (pool * cb->columns), cleared,
-           sizeof(double) * cb->columns * ask);
+    memcpy(cleared + (pool * cb->tcolumns), cleared,
+           sizeof(double) * cb->tcolumns * ask);
     rows -= ask;
     pool += ask;
   }
@@ -113,13 +113,13 @@ static void clear_rows(circular_buffer *cb, unsigned num_rows)
   unsigned row = cb->current_row;
   ++row;
   if (row >= cb->rows) {row = 0;}
-  for (unsigned c = 0; c < cb->columns; ++c) {
-    cb->values[(row * cb->columns) + c] = NAN;
+  for (unsigned c = 0; c < cb->tcolumns; ++c) {
+    cb->values[(row * cb->tcolumns) + c] = NAN;
   }
-  double *cleared = &cb->values[row * cb->columns];
+  double *cleared = &cb->values[row * cb->tcolumns];
   if (row + num_rows - 1 >= cb->rows) {
     copy_cleared_row(cb, cleared, cb->rows - row - 1);
-    for (unsigned c = 0; c < cb->columns; ++c) {
+    for (unsigned c = 0; c < cb->tcolumns; ++c) {
       cb->values[c] = NAN;
     }
     copy_cleared_row(cb, cb->values, row + num_rows - 1 - cb->rows);
@@ -132,28 +132,24 @@ static void clear_rows(circular_buffer *cb, unsigned num_rows)
 static int cb_new(lua_State *lua)
 {
   int n = lua_gettop(lua);
-  luaL_argcheck(lua, n >= 3 && n <= 4, 0, "incorrect number of arguments");
+  luaL_argcheck(lua, n >= 3 && n <= 3, 0, "incorrect number of arguments");
   int rows = luaL_checkint(lua, 1);
   luaL_argcheck(lua, 1 < rows, 1, "rows must be > 1");
   int columns = luaL_checkint(lua, 2);
-  luaL_argcheck(lua, 0 < columns, 2, "columns must be > 0");
+  luaL_argcheck(lua, 0 < columns &&  256 >= columns, 2,
+                "columns must be > 0 and <= 256");
   int seconds_per_row = luaL_checkint(lua, 3);
   luaL_argcheck(lua, 0 < seconds_per_row, 3, "seconds_per_row is out of range");
-  int delta = 0;
-  if (4 == n) {
-    delta = lua_toboolean(lua, 4);
-  }
 
   size_t header_bytes = sizeof(header_info) * columns;
-  size_t buffer_bytes = sizeof(double) * rows * columns;
+  size_t buffer_bytes = sizeof(double) * rows * columns * 2;
   size_t struct_bytes = sizeof(circular_buffer);
 
   size_t nbytes = header_bytes + buffer_bytes + struct_bytes;
   circular_buffer *cb = (circular_buffer *)lua_newuserdata(lua, nbytes);
   cb->ref = LUA_NOREF;
-  cb->delta = delta;
   cb->format = OUTPUT_CBUF;
-  cb->headers = (header_info *)&cb->values[rows * columns];
+  cb->headers = (header_info *)&cb->values[rows * columns * 2];
 
   luaL_getmetatable(lua, mozsvc_circular_buffer);
   lua_setmetatable(lua, -2);
@@ -162,12 +158,13 @@ static int cb_new(lua_State *lua)
   cb->current_row = rows - 1;
   cb->rows = rows;
   cb->columns = columns;
+  cb->tcolumns = columns * 2;
   cb->seconds_per_row = seconds_per_row;
   memset(cb->headers, 0, header_bytes);
-  for (unsigned column_idx = 0; column_idx < cb->columns; ++column_idx) {
-    snprintf(cb->headers[column_idx].name, COLUMN_NAME_SIZE,
-             "Column_%d", column_idx + 1);
-    strncpy(cb->headers[column_idx].unit, default_unit,
+  for (unsigned col = 0; col < cb->columns; ++col) {
+    snprintf(cb->headers[col].name, COLUMN_NAME_SIZE,
+             "Column_%d", col + 1);
+    strncpy(cb->headers[col].unit, default_unit,
             UNIT_LABEL_SIZE - 1);
   }
   clear_rows(cb, rows);
@@ -216,77 +213,47 @@ static int check_column(lua_State *lua, circular_buffer *cb, int arg)
 }
 
 
-static void cb_add_delta(lua_State *lua, circular_buffer *cb,
-                         double ns, int column, double value)
-{
-  // Storing the deltas in a Lua table allows the sandbox to account for the
-  // memory usage. todo: if too inefficient use a C data struct and report
-  // memory usage back to the sandbox
-  time_t t = (time_t)(ns / 1e9);
-  t = t - (t % cb->seconds_per_row);
-  lua_getglobal(lua, mozsvc_circular_buffer_table);
-  if (lua_istable(lua, -1)) {
-    if (cb->ref == LUA_NOREF) {
-      lua_newtable(lua);
-      cb->ref = luaL_ref(lua, -2);
-    }
-    // get the delta table for this cbuf
-    lua_rawgeti(lua, -1, cb->ref);
-    if (!lua_istable(lua, -1)) {
-      lua_pop(lua, 2); // remove bogus table and cbuf table
-      return;
-    }
-
-    // get the delta row using the timestamp
-    lua_rawgeti(lua, -1, (int)t);
-    if (!lua_istable(lua, -1)) {
-      lua_pop(lua, 1); // remove non table entry
-      lua_newtable(lua);
-      lua_rawseti(lua, -2, (int)t);
-      lua_rawgeti(lua, -1, (int)t);
-    }
-
-    // get the previous delta value
-    lua_rawgeti(lua, -1, column);
-    value += lua_tonumber(lua, -1);
-    lua_pop(lua, 1); // remove the old value
-
-    // push the new delta
-    lua_pushnumber(lua, value);
-    lua_rawseti(lua, -2, column);
-
-    lua_pop(lua, 2); // remove ref table, timestamped row
-  } else {
-    luaL_error(lua, "Could not find table %s", mozsvc_circular_buffer_table);
-  }
-  lua_pop(lua, 1); // remove the circular buffer table or failed nil
-  return;
-}
-
-
 static int cb_add(lua_State *lua)
 {
   circular_buffer *cb = check_circular_buffer(lua, 4);
   double ns = luaL_checknumber(lua, 2);
-  int row = check_row(cb,
-                      ns,
-                      1); // advance the buffer forward if
-                          // necessary
+  int row = check_row(cb, ns, 1); // advance the buffer forward if necessary
   int column = check_column(lua, cb, 3);
   double value = luaL_checknumber(lua, 4);
+
   if (row != -1) {
-    int i = (row * cb->columns) + column;
-    if (isnan(cb->values[i])) {
+    int i = (row * cb->tcolumns) + column * 2;
+    double old = cb->values[i];
+
+    if (isnan(old)) {
       cb->values[i] = value;
     } else {
+      if (isnan(value)) {
+        luaL_error(lua, "cannot uninitialize a value");
+      }
       cb->values[i] += value;
+      if (isnan(cb->values[i])) {
+        luaL_error(lua, "add produced a NAN");
+      }
     }
     lua_pushnumber(lua, cb->values[i]);
-    if (cb->delta && value != 0) {
-      if (cb->headers[column].aggregation != AGGREGATION_SUM) {
-        value = cb->values[i];
+    if (old == cb->values[i]) return 1;
+
+    switch (cb->headers[column].aggregation) {
+    case AGGREGATION_SUM:
+      if (isnan(cb->values[i + 1])) {
+        cb->values[i + 1] = value;
+      } else {
+        cb->values[i + 1] += value;
       }
-      cb_add_delta(lua, cb, ns, column, value);
+      break;
+    case AGGREGATION_MIN:
+    case AGGREGATION_MAX:
+      cb->values[i + 1] = cb->values[i];
+      break;
+    default:
+      // none
+      break;
     }
   } else {
     lua_pushnil(lua);
@@ -298,13 +265,12 @@ static int cb_add(lua_State *lua)
 static int cb_get(lua_State *lua)
 {
   circular_buffer *cb = check_circular_buffer(lua, 3);
-  int row = check_row(cb,
-                      luaL_checknumber(lua, 2),
-                      0);
+  int row = check_row(cb, luaL_checknumber(lua, 2), 0);
   int column = check_column(lua, cb, 3);
+  lua_Integer offset = lua_tointeger(lua, lua_upvalueindex(1));
 
   if (row != -1) {
-    lua_pushnumber(lua, cb->values[(row * cb->columns) + column]);
+    lua_pushnumber(lua, cb->values[(row * cb->tcolumns) + column * 2 + offset]);
   } else {
     lua_pushnil(lua);
   }
@@ -327,39 +293,43 @@ static int cb_set(lua_State *lua)
 {
   circular_buffer *cb = check_circular_buffer(lua, 4);
   double ns = luaL_checknumber(lua, 2);
-  int row = check_row(cb, ns, 1); // advance the buffer forward if
-                                  // necessary
+  int row = check_row(cb, ns, 1); // advance the buffer forward if necessary
   int column = check_column(lua, cb, 3);
   double value = luaL_checknumber(lua, 4);
 
   if (row != -1) {
-    int i = (row * cb->columns) + column;
+    int i = (row * cb->tcolumns) + column * 2;
     double old = cb->values[i];
+    if (isnan(value) && !isnan(old)) {
+      luaL_error(lua, "cannot uninitialize a value");
+    }
     switch (cb->headers[column].aggregation) {
+    case AGGREGATION_SUM:
+      cb->values[i] = value;
+      if (isfinite(old)) {
+        value -= old;
+        if (value == 0) break;
+      }
+      if (isnan(cb->values[i + 1])) {
+        cb->values[i + 1] = value;
+      } else {
+        cb->values[i + 1] += value;
+      }
+      break;
     case AGGREGATION_MIN:
-      if (isnan(cb->values[i]) || value < old) {
+      if (isnan(old) || value < old) {
         cb->values[i] = value;
-        if (cb->delta) {
-          cb_add_delta(lua, cb, ns, column, value);
-        }
+        cb->values[i + 1] = value;
       }
       break;
     case AGGREGATION_MAX:
-      if (isnan(cb->values[i]) || value > old) {
+      if (isnan(old) || value > old) {
         cb->values[i] = value;
-        if (cb->delta) {
-          cb_add_delta(lua, cb, ns, column, value);
-        }
+        cb->values[i + 1] = value;
       }
       break;
     default:
       cb->values[i] = value;
-      if (cb->delta) {
-        if (!isnan(old) && old != INFINITY && old != -INFINITY) {
-          value -= old;
-        }
-        cb_add_delta(lua, cb, ns, column, value);
-      }
       break;
     }
     lua_pushnumber(lua, cb->values[i]);
@@ -377,7 +347,7 @@ static int cb_set_header(lua_State *lua)
   const char *name = luaL_checkstring(lua, 3);
   const char *unit = luaL_optstring(lua, 4, default_unit);
   cb->headers[column].aggregation = luaL_checkoption(lua, 5, "sum",
-                                                     column_aggregation_methods);
+                                                     agg_methods);
 
   strncpy(cb->headers[column].name, name, COLUMN_NAME_SIZE - 1);
   char *n = cb->headers[column].name;
@@ -406,8 +376,7 @@ static int cb_get_header(lua_State *lua)
 
   lua_pushstring(lua, cb->headers[column].name);
   lua_pushstring(lua, cb->headers[column].unit);
-  lua_pushstring(lua,
-                 column_aggregation_methods[cb->headers[column].aggregation]);
+  lua_pushstring(lua, agg_methods[cb->headers[column].aggregation]);
   return 3;
 }
 
@@ -416,6 +385,7 @@ static int cb_get_range(lua_State *lua)
 {
   circular_buffer *cb = check_circular_buffer(lua, 2);
   int column = check_column(lua, cb, 2);
+  lua_Integer offset = lua_tointeger(lua, lua_upvalueindex(1));
 
   // optional range arguments
   double start_ns = luaL_optnumber(lua, 3, get_start_time(cb) * 1e9);
@@ -436,7 +406,7 @@ static int cb_get_range(lua_State *lua)
     if (row == (int)cb->rows) {
       row = 0;
     }
-    lua_pushnumber(lua, cb->values[(row * cb->columns) + column]);
+    lua_pushnumber(lua, cb->values[(row * cb->tcolumns) + column * 2 + offset]);
     lua_rawseti(lua, -2, ++i);
   } while (row++ != end_row);
 
@@ -450,6 +420,131 @@ static int cb_current_time(lua_State *lua)
   lua_pushnumber(lua, cb->current_time * 1e9);
   return 1; // return the current time
 }
+
+
+static int cb_version(lua_State *lua)
+{
+  lua_pushstring(lua, DIST_VERSION);
+  return 1;
+}
+
+
+#ifdef LUA_SANDBOX
+static void escape_annotation(lua_State *lua, const char *anno)
+{
+  luaL_Buffer b;
+  luaL_buffinit(lua, &b);
+  for (int i = 0; anno[i]; ++i) {
+    switch (anno[i]) {
+    case '\\':
+    case '"':
+    case '/':
+      luaL_addchar(&b, '\\');
+      luaL_addchar(&b, anno[i]);
+      break;
+    case '\b':
+      luaL_addstring(&b, "\\b");
+      break;
+    case '\t':
+      luaL_addstring(&b, "\\t");
+      break;
+    case '\n':
+      luaL_addstring(&b, "\\n");
+      break;
+    case '\f':
+      luaL_addstring(&b, "\\f");
+      break;
+    case '\r':
+      luaL_addstring(&b, "\\r");
+      break;
+    default:
+      if (isprint(anno[i])) {
+        luaL_addchar(&b, anno[i]);
+      } else {
+        luaL_addchar(&b, ' ');
+      }
+    }
+  }
+  luaL_pushresult(&b);
+}
+
+
+static int cb_annotate(lua_State *lua)
+{
+  static const char *atypes[] = { "info", "alert", NULL };
+
+  circular_buffer *cb = check_circular_buffer(lua, 5);
+  double ns = luaL_checknumber(lua, 2);
+  int row = check_row(cb, ns, 0);
+  int column = check_column(lua, cb, 3);
+  int atidx = luaL_checkoption(lua, 4, NULL, atypes);
+  const char *annotation = luaL_checkstring(lua, 5);
+  int delta = 1;
+  switch (lua_type(lua, 6)) {
+  case LUA_TNONE:
+  case LUA_TNIL:
+    break;
+  case LUA_TBOOLEAN:
+    delta = lua_toboolean(lua, 6);
+    break;
+  default:
+    luaL_argerror(lua, 6, "delta must be boolean");
+    break;
+  }
+  if (row == -1) {return 0;}
+
+  time_t t = (time_t)(ns / 1e9);
+  t = t - (t % cb->seconds_per_row);
+  lua_getglobal(lua, mozsvc_circular_buffer_table);
+  if (lua_istable(lua, -1)) {
+    if (cb->ref == LUA_NOREF) {
+      lua_newtable(lua);
+      cb->ref = luaL_ref(lua, -2);
+    }
+    // get the annotation ref table for this cbuf
+    lua_rawgeti(lua, -1, cb->ref);
+    if (!lua_istable(lua, -1)) {
+      return luaL_error(lua, "Could not find the annotation ref table");
+    }
+
+    // get the annotation row table using the timestamp
+    lua_rawgeti(lua, -1, (int)t);
+    if (!lua_istable(lua, -1)) {
+      lua_pop(lua, 1); // remove non table entry
+      lua_newtable(lua);
+      lua_pushvalue(lua, -1);
+      lua_rawseti(lua, -3, (int)t);
+    }
+
+    // get annotation column table
+    lua_rawgeti(lua, -1, column + 1);
+    if (!lua_istable(lua, -1)) {
+      lua_pop(lua, 1); // remove non table entry
+      lua_newtable(lua);
+      lua_pushvalue(lua, -1);
+      lua_rawseti(lua, -3, column + 1);
+    }
+
+    // create/overwrite table values
+    lua_pushstring(lua, atypes[atidx]);
+    lua_setfield(lua, -2, "type");
+
+    escape_annotation(lua, annotation);
+    lua_setfield(lua, -2, "annotation");
+
+    if (delta) {
+      lua_pushboolean(lua, delta);
+      lua_setfield(lua, -2, "delta");
+    }
+
+    lua_pop(lua, 3); // remove ref table, row table, column table
+  } else {
+    luaL_error(lua, "Could not find table %s", mozsvc_circular_buffer_table);
+  }
+  lua_pop(lua, 1); // remove the circular buffer table or failed nil
+  return 0;
+}
+
 
 static int cb_format(lua_State *lua)
 {
@@ -473,11 +568,12 @@ static void read_time_row(char **p, circular_buffer *cb)
 
 static int read_double(char **p, double *value)
 {
-  while (**p != 0 && isspace(**p)) {
+  while (**p && isspace(**p)) {
     ++*p;
   }
-  if (0 == **p) return 0;
+  if (!**p) return 0;
 
+  char *end = NULL;
 #ifdef _MSC_VER
   if ((*p)[0] == 'n' && strncmp(*p, not_a_number, 3) == 0) {
     *p += 3;
@@ -489,26 +585,34 @@ static int read_double(char **p, double *value)
     *p += 4;
     *value = -INFINITY;
   } else {
-    *value = strtod(*p, &*p);
+    *value = strtod(*p, &end);
   }
 #else
-  *value = strtod(*p, &*p);
+  *value = strtod(*p, &end);
 #endif
+  if (*p == end) {
+    return 0;
+  }
+  *p = end;
   return 1;
 }
 
 
-static void cb_delta_fromstring(lua_State *lua,
-                                circular_buffer *cb,
-                                char **p)
+static void cbufd_fromstring(lua_State *lua,
+                             circular_buffer *cb,
+                             char **p)
 {
   double value, ns = 0;
   size_t pos = 0;
+  int row = -1;
   while (read_double(&*p, &value)) {
     if (pos == 0) { // new row, starts with a time_t
       ns = value * 1e9;
+      row = check_row(cb, ns, 0);
     } else {
-      cb_add_delta(lua, cb, ns, (int)(pos - 1), value);
+      if (row != -1) {
+        cb->values[(row * cb->tcolumns) + (pos - 1) * 2 + 1] = value;
+      }
     }
     if (pos == cb->columns) {
       pos = 0;
@@ -536,12 +640,11 @@ static int cb_fromstring(lua_State *lua)
   size_t len = cb->rows * cb->columns;
   double value;
   while (pos < len && read_double(&p, &value)) {
-    cb->values[pos++] = value;
+    cb->values[pos++ * 2] = value;
   }
+
   if (pos == len) {
-    if (cb->delta) {
-      cb_delta_fromstring(lua, cb, &p);
-    }
+    cbufd_fromstring(lua, cb, &p);
   } else {
     luaL_error(lua, "fromstring() too few values: %d, expected %d", pos, len);
   }
@@ -551,27 +654,18 @@ static int cb_fromstring(lua_State *lua)
   return 0;
 }
 
-
-static int cb_version(lua_State *lua)
+static int output_cbuf(circular_buffer *cb, lsb_output_buffer *ob)
 {
-  lua_pushstring(lua, DIST_VERSION);
-  return 1;
-}
-
-
-#ifdef LUA_SANDBOX
-static int
-output_cbuf(circular_buffer *cb, lsb_output_buffer *ob)
-{
-  unsigned column_idx;
-  unsigned row_idx = cb->current_row + 1;
-  for (unsigned i = 0; i < cb->rows; ++i, ++row_idx) {
-    if (row_idx >= cb->rows) row_idx = 0;
-    for (column_idx = 0; column_idx < cb->columns; ++column_idx) {
-      if (column_idx != 0) {
+  unsigned col;
+  unsigned row = cb->current_row + 1;
+  for (unsigned i = 0; i < cb->rows; ++i, ++row) {
+    if (row >= cb->rows) row = 0;
+    for (col = 0; col < cb->columns; ++col) {
+      if (col != 0) {
         if (lsb_outputc(ob, '\t')) return 1;
       }
-      if (lsb_outputd(ob, cb->values[(row_idx * cb->columns) + column_idx])) {
+      if (lsb_outputd(ob,
+                      cb->values[(row * cb->tcolumns) + col * 2])) {
         return 1;
       }
     }
@@ -581,60 +675,138 @@ output_cbuf(circular_buffer *cb, lsb_output_buffer *ob)
 }
 
 
-static int
-output_cb_cbufd(lua_State *lua, circular_buffer *cb,
-                lsb_output_buffer *ob)
+static bool is_row_dirty(circular_buffer *cb, unsigned row)
 {
-  lua_getglobal(lua, mozsvc_circular_buffer_table);
-  if (lua_istable(lua, -1)) {
-    // get the delta table for this cbuf
-    lua_rawgeti(lua, -1, cb->ref);
-    if (!lua_istable(lua, -1)) {
-      lua_pop(lua, 2); // remove bogus table and cbuf table
-      luaL_error(lua, "Could not find the delta table");
+  bool dirty = false;
+  for (unsigned col = 0; col < cb->columns; ++col) {
+    if (!isnan(cb->values[(row * cb->tcolumns) + col * 2 + 1])) {
+      dirty = true;
+      break;
     }
-    lua_pushnil(lua);
-    while (lua_next(lua, -2) != 0) {
-      if (!lua_istable(lua, -1)) {
-        luaL_error(lua, "Invalid delta table structure");
-      }
-      if (lsb_outputd(ob, lua_tonumber(lua, -2))) return 1;
-      for (unsigned column_idx = 0; column_idx < cb->columns;
-           ++column_idx) {
-        if (lsb_outputc(ob, '\t')) return 1;
-        lua_rawgeti(lua, -1, column_idx);
-        if (LUA_TNIL == lua_type(lua, -1)) {
-          if (lsb_outputs(ob, not_a_number, 3)) return 1;
-        } else {
-          if (lsb_outputd(ob, lua_tonumber(lua, -1))) return 1;
-        }
-        lua_pop(lua, 1); // remove the number
-      }
-      if (lsb_outputc(ob, '\n')) return 1;
-      lua_pop(lua, 1); // remove the value, keep the key
-    }
-    lua_pop(lua, 1); // remove the delta table
-
-    // delete the delta table
-    luaL_unref(lua, -1, cb->ref);
-    cb->ref = LUA_NOREF;
-  } else {
-    luaL_error(lua, "Could not find table %s", mozsvc_circular_buffer_table);
   }
-  lua_pop(lua, 1); // remove the circular buffer table or failed nil
+  return dirty;
+}
+
+
+static int
+output_cbufd(circular_buffer *cb, lsb_output_buffer *ob, bool serialize)
+{
+  char sep = '\t';
+  char eol = '\n';
+  if (serialize) {
+    sep = ' ';
+    eol = ' ';
+  }
+  long long t = get_start_time(cb);
+  unsigned col;
+  unsigned row = cb->current_row + 1;
+  for (unsigned i = 0; i < cb->rows; ++i, ++row) {
+    if (row >= cb->rows) {
+      row = 0;
+    }
+    if (is_row_dirty(cb, row)) {
+      if (lsb_outputf(ob, "%lld", t)) return 1;
+      for (col = 0; col < cb->columns; ++col) {
+        if (lsb_outputc(ob, sep)) return 1;
+        int idx = (row * cb->tcolumns) + col * 2 + 1;
+        if (lsb_outputd(ob, cb->values[idx])) return 1;
+        cb->values[idx] = NAN;
+      }
+      if (lsb_outputc(ob, eol)) return 1;
+    }
+    t += cb->seconds_per_row;
+  }
   return 0;
 }
 
 
-static int output_circular_buffer(lua_State *lua)
+static void
+output_annotations(lua_State *lua, circular_buffer *cb, lsb_output_buffer *ob,
+                   const char *key)
+{
+  if (cb->ref == LUA_NOREF) return;
+
+  lua_getglobal(lua, mozsvc_circular_buffer_table);
+  if (lua_istable(lua, -1)) {
+    lua_rawgeti(lua, -1, cb->ref); // get the annotation table for this cbuf
+    if (!lua_istable(lua, -1)) {
+      lua_pop(lua, 2); // remove value and cbuf table
+      return;
+    }
+    lua_pushnil(lua);
+    bool first = true;
+    while (lua_next(lua, -2) != 0) {
+      if (!lua_istable(lua, -1)) {
+        luaL_error(lua, "Invalid annotation table structure");
+      }
+      long long ms = (long long)lua_tonumber(lua, -2) * 1000;
+      for (unsigned col = 1; col <= cb->columns; ++col) {
+        lua_rawgeti(lua, -1, col);
+        if (lua_type(lua, -1) == LUA_TTABLE) {
+          lua_getfield(lua, -1, "delta");
+          bool delta = lua_toboolean(lua, -1);
+          lua_pop(lua, 1);
+
+          int output = 1;
+          if (!key && OUTPUT_CBUFD == cb->format) {
+            if (delta) {
+              lua_pushnil(lua);
+              lua_setfield(lua, -2, "delta");
+            } else {
+              output = 0;
+            }
+          }
+          if (output) {
+            lua_getfield(lua, -1, "annotation");
+            const char *annotation = lua_tostring(lua, -1);
+            size_t len;
+            lua_getfield(lua, -2, "type");
+            const char *atype = lua_tolstring(lua, -1, &len);
+            if (!annotation || !atype || len == 0) {
+              luaL_error(lua, "malformend annotation table");
+            }
+            if (key) {
+              lsb_outputf(ob, "%s:annotate(%g, %u, \"%s\", \"%s\", %s)\n",
+                          key,
+                          ms * 1e6,
+                          col,
+                          atype,
+                          annotation,
+                          delta ? "true" : "false");
+            } else {
+              if (first) {
+                first = false;
+              } else {
+                lsb_outputc(ob, ',');
+              }
+              lsb_outputf(ob, "{\"x\":%lld,"
+                          "\"col\":%u,"
+                          "\"shortText\":\"%c\","
+                          "\"text\":\"%s\"}",
+                          ms, col, atype[0], annotation);
+            }
+            lua_pop(lua, 2); // remove atype and text
+          }
+        }
+        lua_pop(lua, 1); // remove the column table
+      }
+      lua_pop(lua, 1); // remove the value, keep the key
+    }
+    lua_pop(lua, 1); // remove the annotation table
+  } else {
+    luaL_error(lua, "Could not find table %s", mozsvc_circular_buffer_table);
+  }
+  lua_pop(lua, 1); // remove the circular buffer table or failed nil
+  return;
+}
+
+
+static int cb_output(lua_State *lua)
 {
   lsb_output_buffer *ob = lua_touserdata(lua, -1);
   circular_buffer *cb = lua_touserdata(lua, -2);
   if (!(ob && cb)) {
     return 1;
-  }
-  if (OUTPUT_CBUFD == cb->format) {
-    if (cb->ref == LUA_NOREF) return 0;
   }
 
   if (lsb_outputf(ob,
@@ -647,107 +819,64 @@ static int output_circular_buffer(lua_State *lua)
     return 1;
   }
 
-  unsigned column_idx;
-  for (column_idx = 0; column_idx < cb->columns; ++column_idx) {
-    if (column_idx != 0) {
+  for (unsigned col = 0; col < cb->columns; ++col) {
+    if (col != 0) {
       if (lsb_outputc(ob, ',')) return 1;
     }
     if (lsb_outputf(ob, "{\"name\":\"%s\",\"unit\":\"%s\",\""
                     "aggregation\":\"%s\"}",
-                    cb->headers[column_idx].name,
-                    cb->headers[column_idx].unit,
-                    column_aggregation_methods[cb->headers[column_idx].aggregation])) {
+                    cb->headers[col].name,
+                    cb->headers[col].unit,
+                    agg_methods[cb->headers[col].aggregation])) {
       return 1;
     }
   }
+  if (lsb_outputs(ob, "],\"annotations\":[", 17)) return 1;
+  output_annotations(lua, cb, ob, NULL);
   if (lsb_outputs(ob, "]}\n", 3)) return 1;
 
   if (OUTPUT_CBUFD == cb->format) {
-    return output_cb_cbufd(lua, cb, ob);
+    size_t pos = ob->pos;
+    int rv = output_cbufd(cb, ob, false);
+    if (rv == 0 && ob->pos == pos) {
+      ob->pos = 0;
+    }
+    return rv;
   }
   return output_cbuf(cb, ob);
 }
 
 
-static int serialize_cb_delta(lua_State *lua, circular_buffer *cb,
-                              lsb_output_buffer *ob)
-{
-  if (cb->ref == LUA_NOREF) return 0;
-  lua_getglobal(lua, mozsvc_circular_buffer_table);
-  if (lua_istable(lua, -1)) {
-    // get the delta table for this cbuf
-    lua_rawgeti(lua, -1, cb->ref);
-    if (!lua_istable(lua, -1)) {
-      lua_pop(lua, 2); // remove bogus table and cbuf table
-      luaL_error(lua, "Could not find the delta table");
-    }
-    lua_pushnil(lua);
-    while (lua_next(lua, -2) != 0) {
-      if (!lua_istable(lua, -1)) {
-        luaL_error(lua, "Invalid delta table structure");
-      }
-      if (lsb_outputc(ob, ' ')) return 1;
-      // intentionally not serialized as Lua
-      if (lsb_outputd(ob, lua_tonumber(lua, -2))) return 1;
-
-      for (unsigned column_idx = 0; column_idx < cb->columns;
-           ++column_idx) {
-        if (lsb_outputc(ob, ' ')) return 1;
-        lua_rawgeti(lua, -1, column_idx);
-        // intentionally not serialized as Lua
-        if (lsb_outputd(ob, lua_tonumber(lua, -1))) return 1;
-        lua_pop(lua, 1); // remove the number
-      }
-      lua_pop(lua, 1); // remove the value, keep the key
-    }
-    lua_pop(lua, 1); // remove the delta table
-
-    // delete the delta table
-    lua_pushnil(lua);
-    lua_rawseti(lua, -2, cb->ref);
-    cb->ref = LUA_NOREF;
-  } else {
-    luaL_error(lua, "Could not find table %s", mozsvc_circular_buffer_table);
-  }
-  lua_pop(lua, 1); // remove the circular buffer table or failed nil
-  return 0;
-}
-
-
-static int serialize_circular_buffer(lua_State *lua)
+static int cb_serialize(lua_State *lua)
 {
   lsb_output_buffer *ob = lua_touserdata(lua, -1);
   const char *key = lua_touserdata(lua, -2);
   circular_buffer *cb = lua_touserdata(lua, -3);
-  if (!(ob && key && cb)) {
-    return 1;
-  }
-  char *delta = "";
-  if (cb->delta) {
-    delta = ", true";
-  }
+  if (!(ob && key && cb)) {return 1;}
   if (lsb_outputf(ob,
-                  "if %s == nil then %s = circular_buffer.new(%d, %d, %d%s) end\n",
+                  "if %s == nil then "
+                  "%s = circular_buffer.new(%d, %d, %d) end\n",
                   key,
                   key,
                   cb->rows,
                   cb->columns,
-                  cb->seconds_per_row,
-                  delta)) {
+                  cb->seconds_per_row)) {
     return 1;
   }
 
-  unsigned column_idx;
-  for (column_idx = 0; column_idx < cb->columns; ++column_idx) {
+  unsigned col;
+  for (col = 0; col < cb->columns; ++col) {
     if (lsb_outputf(ob, "%s:set_header(%d, \"%s\", \"%s\", \"%s\")\n",
                     key,
-                    column_idx + 1,
-                    cb->headers[column_idx].name,
-                    cb->headers[column_idx].unit,
-                    column_aggregation_methods[cb->headers[column_idx].aggregation])) {
+                    col + 1,
+                    cb->headers[col].name,
+                    cb->headers[col].unit,
+                    agg_methods[cb->headers[col].aggregation])) {
       return 1;
     }
   }
+
+  output_annotations(lua, cb, ob, key);
 
   if (lsb_outputf(ob, "%s:fromstring(\"%lld %d",
                   key,
@@ -755,25 +884,54 @@ static int serialize_circular_buffer(lua_State *lua)
                   cb->current_row)) {
     return 1;
   }
-  for (unsigned row_idx = 0; row_idx < cb->rows; ++row_idx) {
-    for (column_idx = 0; column_idx < cb->columns; ++column_idx) {
+
+  for (unsigned row = 0; row < cb->rows; ++row) {
+    for (col = 0; col < cb->columns; ++col) {
       if (lsb_outputc(ob, ' ')) return 1;
       // intentionally not serialized as Lua
-      if (lsb_outputd(ob, cb->values[(row_idx * cb->columns) + column_idx])) {
+      if (lsb_outputd(ob,
+                      cb->values[(row * cb->tcolumns) + col * 2])) {
         return 1;
       }
     }
   }
-  if (serialize_cb_delta(lua, cb, ob)) {
-    return 1;
+  if (lsb_outputc(ob, ' ')) return 1;
+  if (output_cbufd(cb, ob, true)) {return 1;}
+  if (ob->buf[ob->pos - 1] == ' ') {
+    --ob->pos;
   }
-  if (lsb_outputs(ob, "\")\n", 3)) {
-    return 1;
+  if (lsb_outputs(ob, "\")\n", 3)) {return 1;}
+  return 0;
+}
+
+
+static int cb_gc(lua_State *lua)
+{
+  circular_buffer *cb = check_circular_buffer(lua, 0);
+  if (cb->ref != LUA_NOREF) {
+    lua_getglobal(lua, mozsvc_circular_buffer_table);
+    if (lua_istable(lua, -1)) {
+      luaL_unref(lua, -1, cb->ref);
+    }
+    lua_pop(lua, 1);
+    cb->ref = LUA_NOREF;
+  }
+  return 0;
+}
+
+#else
+static int cb_reset_delta(lua_State *lua)
+{
+  circular_buffer *cb = check_circular_buffer(lua, 0);
+  for (unsigned row = 0; row < cb->rows; ++row) {
+    for (unsigned col = 0; col < cb->columns; ++col) {
+      int idx = (row * cb->tcolumns) + col * 2 + 1;
+      cb->values[idx] = NAN;
+    }
   }
   return 0;
 }
 #endif
-
 
 static const struct luaL_reg circular_bufferlib_f[] =
 {
@@ -787,14 +945,22 @@ static const struct luaL_reg circular_bufferlib_m[] =
   { "add", cb_add },
   { "get", cb_get },
   { "get_configuration", cb_get_configuration },
-  { "set", cb_set },
-  { "set_header", cb_set_header },
+  { "current_time", cb_current_time },
   { "get_header", cb_get_header },
   { "get_range", cb_get_range },
-  { "current_time", cb_current_time },
+  { "set", cb_set },
+  { "set_header", cb_set_header },
+  // @todo add __tostring for non sandbox use
+
+#ifdef LUA_SANDBOX
+  { "annotate", cb_annotate },
   { "format", cb_format },
-  { "fromstring", cb_fromstring } // used for data restoration
-  , { NULL, NULL }
+  { "fromstring", cb_fromstring }, // used for sandbox data restoration
+  { "__gc", cb_gc },
+#else
+  { "reset_delta", cb_reset_delta },
+#endif
+  { NULL, NULL }
 };
 
 
@@ -802,14 +968,23 @@ int luaopen_circular_buffer(lua_State *lua)
 {
 #ifdef LUA_SANDBOX
   lua_newtable(lua);
-  lsb_add_serialize_function(lua, serialize_circular_buffer);
-  lsb_add_output_function(lua, output_circular_buffer);
+  lsb_add_serialize_function(lua, cb_serialize);
+  lsb_add_output_function(lua, cb_output);
   lua_replace(lua, LUA_ENVIRONINDEX);
 #endif
   luaL_newmetatable(lua, mozsvc_circular_buffer);
   lua_pushvalue(lua, -1);
   lua_setfield(lua, -2, "__index");
   luaL_register(lua, NULL, circular_bufferlib_m);
+
+  lua_pushinteger(lua, 1); // offset to allow reuse of cb_get with deltas
+  lua_pushcclosure(lua, cb_get, 1);
+  lua_setfield(lua, -2, "get_delta");
+
+  lua_pushinteger(lua, 1);  // offset to allow reuse of cb_get_range with deltas
+  lua_pushcclosure(lua, cb_get_range, 1);
+  lua_setfield(lua, -2, "get_range_delta");
+
   luaL_register(lua, mozsvc_circular_buffer_table, circular_bufferlib_f);
   return 1;
 }

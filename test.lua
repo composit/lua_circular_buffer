@@ -14,6 +14,7 @@ local errors = {
     function() local cb = circular_buffer.new(2, 0, 1) end, -- new() zero column
     function() local cb = circular_buffer.new(2, 1, nil) end, -- new() non numeric seconds_per_row
     function() local cb = circular_buffer.new(2, 1, 0) end, -- new() zero seconds_per_row
+    function() local cb = circular_buffer.new(2, 257, 0) end, -- new() too many columns
     function() local cb = circular_buffer.new(2, 1, 1) -- set() out of range column
     cb:set(0, 2, 1.0) end,
     function() local cb = circular_buffer.new(2, 1, 1) -- set() zero column
@@ -45,16 +46,16 @@ local errors = {
     cb:format("cbuf", true) end,
     function() local cb = circular_buffer.new(2, 1, 1) -- format() missing
     cb:format() end,
-    function() local cb = circular_buffer.new(2, 1, 1) -- too few
-    cb:fromstring("") end,
-    function() local cb = circular_buffer.new(2, 1, 1) -- too few invalid
-    cb:fromstring("0 0 na 1") end,
-    function() local cb = circular_buffer.new(2, 1, 1) -- too many
-    cb:fromstring("0 0 1 2 3") end,
     function() local cb = circular_buffer.new(10, 1, 1)
     cb:get_header() end, -- incorrect # args
     function() local cb = circular_buffer.new(10, 1, 1)
-    cb:get_header(99) end -- out of range column
+    cb:get_header(99) end, -- out of range column
+    function() local cb = circular_buffer.new(2, 1, 1) -- uninitialize a value
+    cb:set(0, 1, 1); cb:set(0, 1, 0/0) end,
+    function() local cb = circular_buffer.new(2, 1, 1) -- uninitialize a value
+    cb:set(0, 1, 1); cb:add(0, 1, 0/0) end,
+    function() local cb = circular_buffer.new(2, 1, 1) -- NAN result
+    cb:set(0, 1, 1/0); cb:add(0, 1, -1/0) end,
 }
 
 for i, v in ipairs(errors) do
@@ -89,6 +90,10 @@ local tests = {
 
         a = stats:get_range(1, 11e9, 14e9)
         if a then error(string.format("out of range %d", #a)) end
+
+        a = stats:get_range_delta(1)
+        assert(#a == 5, #a)
+        for i=1, #a do assert(i == a[i]) end
         end,
     function()
         local stats = circular_buffer.new(2, 1, 1)
@@ -96,13 +101,18 @@ local tests = {
         if nan == nan then
             error(string.format("initial value is a number %G", nan))
         end
+        nan = stats:get_delta(0, 1)
+        if nan == nan then
+            error(string.format("initial delta value is a number %G", nan))
+        end
+
         local v = stats:set(0, 1, 1)
         if v ~= 1 then
             error(string.format("set failed = %G", v))
         end
-        v = stats:add(0, 1, 0/0)
-        if v == v then
-            error(string.format("adding nan returned a number %G", v))
+        v = stats:get_delta(0, 1)
+        if v ~= 1 then
+            error(string.format("get_delta failed = %G", v))
         end
         end,
     function()
@@ -114,15 +124,6 @@ local tests = {
         local v = stats:set(0, 1, 1)
         if stats:get(0, 1) ~= 1 then
             error(string.format("set failed = %G", v))
-        end
-        stats:fromstring("1 1 nan 99")
-        local nan = stats:get(0, 1)
-        if nan == nan then
-            error(string.format("restored value is a number %G", nan))
-        end
-        v = stats:get(1e9, 1)
-        if v ~= 99 then
-            error(string.format("restored value is %G", v))
         end
         end,
     function()
@@ -147,6 +148,119 @@ local tests = {
         assert(not cb:get(10*1e9, 1), "value found beyond the end of the buffer")
         cb:set(20*1e9, 1, 1)
         assert(not cb:get(10*1e9, 1), "value found beyond the start of the buffer")
+        end,
+    function()
+        local cb = circular_buffer.new(2,1,1)
+        assert(1e9 == cb:current_time(), "current time not 1e9")
+        local v = cb:set(3e9, 1, 0/0)
+        assert(not (v == v), "advance the buffer with a NAN")
+        assert(3e9 == cb:current_time(), "current time not 3e9")
+        local v = cb:add(4e9, 1, 0/0)
+        assert(not (v == v), "advance the buffer with a NAN")
+        assert(4e9 == cb:current_time(), "current time not 4e9")
+        end,
+    function()
+        local stats = circular_buffer.new(2, 4, 1)
+        if not stats.reset_delta then return end
+
+        stats:set_header(1, "count", "count", "sum")
+        stats:set_header(2, "min", "count", "min")
+        stats:set_header(3, "max", "count", "max")
+        stats:set_header(4, "none", "avg", "none")
+        local v
+
+        -- deltas equal to the initial values
+        v = stats:add(0, 1, 0)
+        if v ~= 0 then error(string.format("add failed = %G", v)) end
+        v = stats:get_delta(0, 1)
+        if v ~= 0 then error(string.format("invalid delta value %G", v)) end
+
+        v = stats:add(0, 2, -2)
+        if v ~= -2 then error(string.format("add failed = %G", v)) end
+        v = stats:get_delta(0, 2)
+        if v ~= -2 then error(string.format("invalid delta value %G", v)) end
+
+        v = stats:add(0, 3, -3)
+        if v ~= -3 then error(string.format("add failed = %G", v)) end
+        v = stats:get_delta(0, 3)
+        if v ~= -3 then error(string.format("invalid delta value %G", v)) end
+
+        v = stats:add(0, 4, 4)
+        if v ~= 4 then error(string.format("add failed = %G", v)) end
+        v = stats:get_delta(0, 4)
+        if v == v then error(string.format("invalid delta value %G", v)) end
+
+        -- updates with no change
+        stats:reset_delta()
+        v = stats:set(0, 1, 0)
+        if v ~= 0 then error(string.format("sot failed = %G", v)) end
+        v = stats:get_delta(0, 1)
+        if v == v then error(string.format("invalid delta value %G", v)) end
+
+        v = stats:set(0, 1, stats:get(0, 1))
+        if v ~= 0 then error(string.format("set failed = %G", v)) end
+        v = stats:get_delta(0, 1)
+        if v == v then error(string.format("invalid delta value %G", v)) end
+
+        v = stats:set(0, 2, -1)
+        if v ~= -2 then error(string.format("set failed = %G", v)) end
+        v = stats:get_delta(0, 2)
+        if v == v then error(string.format("invalid delta value %G", v)) end
+
+        v = stats:set(0, 3, -4)
+        if v ~= -3 then error(string.format("set failed = %G", v)) end
+        v = stats:get_delta(0, 3)
+        if v == v then error(string.format("invalid delta value %G", v)) end
+
+        v = stats:set(0, 4, 4)
+        if v ~= 4 then error(string.format("set failed = %G", v)) end
+        v = stats:get_delta(0, 4)
+        if v == v then error(string.format("invalid delta value %G", v)) end
+
+        -- update with change
+        stats:reset_delta()
+        v = stats:add(0, 1, 3)
+        v = stats:add(0, 1, 2)
+        if v ~= 5 then error(string.format("set failed = %G", v)) end
+        v = stats:get_delta(0, 1)
+        if v ~= 5 then error(string.format("invalid delta value %G", v)) end
+
+        v = stats:set(0, 2, -3) -- new min
+        if v ~= -3 then error(string.format("set failed = %G", v)) end
+        v = stats:get_delta(0, 2) -- min not expressed as a delta
+        if v ~= -3 then error(string.format("invalid delta value %G", v)) end
+
+        v = stats:set(0, 3, -2) -- new max
+        if v ~= -2 then error(string.format("set failed = %G", v)) end
+        v = stats:get_delta(0, 3) -- max not expressed as a delta
+        if v ~= -2 then error(string.format("invalid delta value %G", v)) end
+
+        v = stats:set(0, 4, 5)
+        if v ~= 5 then error(string.format("set failed = %G", v)) end
+        v = stats:get_delta(0, 4)
+        if v == v then error(string.format("invalid delta value %G", v)) end
+
+        -- infinity tests
+        stats:reset_delta()
+        v = stats:set(0, 1, 1/0)
+        if v ~= 1/0 then error(string.format("set failed = %G", v)) end
+        v = stats:get_delta(0, 1)
+        if v ~= 1/0 then error(string.format("invalid delta value %G", v)) end
+
+        v = stats:set(0, 2, -1/0) -- new min
+        if v ~= -1/0 then error(string.format("set failed = %G", v)) end
+        v = stats:get_delta(0, 2) -- min not expressed as a delta
+        if v ~= -1/0 then error(string.format("invalid delta value %G", v)) end
+
+        v = stats:set(0, 3, 1/0) -- new max
+        if v ~= 1/0 then error(string.format("set failed = %G", v)) end
+        v = stats:get_delta(0, 3) -- max not expressed as a delta
+        if v ~= 1/0 then error(string.format("invalid delta value %G", v)) end
+
+        v = stats:set(0, 4, 1/0) -- new max
+        if v ~= 1/0 then error(string.format("set failed = %G", v)) end
+        v = stats:get_delta(0, 4) -- max not expressed as a delta
+        if v == v then error(string.format("invalid delta value %G", v)) end
         end,
 }
 
